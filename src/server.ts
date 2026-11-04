@@ -8,8 +8,10 @@ import {
   handleEditFile,
   handleListTransactions,
   handleReadFile,
+  handleRedoEdit,
   handleRollbackFile,
   handleSearchFile,
+  handleUndoEdit,
   toolDescriptors,
   ToolResult,
 } from "./tools.js";
@@ -17,7 +19,7 @@ import { ServerState } from "./state.js";
 
 export function createServer(state: ServerState): Server {
   const server = new Server(
-    { name: "mcp-edit", version: "0.4.0" },
+    { name: "editor", version: "0.5.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -39,6 +41,12 @@ export function createServer(state: ServerState): Server {
         break;
       case "edit_file":
         result = await handleEditFile(a, state);
+        break;
+      case "undo_edit":
+        result = await handleUndoEdit(a, state);
+        break;
+      case "redo_edit":
+        result = await handleRedoEdit(a, state);
         break;
       case "commit_file":
         result = await handleCommitFile(a, state);

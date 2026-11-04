@@ -14,7 +14,7 @@ export function loadConfig(): Config {
 
   const backupRoot = path.resolve(
     process.env.MCP_EDIT_BACKUP_DIR ||
-      path.join(workspaceRoot, ".mcp-edit")
+      path.join(workspaceRoot, ".editor")
   );
 
   const timeoutRaw = process.env.MCP_EDIT_TIMEOUT_MS || "600000";

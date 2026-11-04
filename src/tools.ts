@@ -12,7 +12,7 @@ import { applyEdits, Edit, formatUnifiedDiff } from "./edits.js";
 import { ServerState } from "./state.js";
 
 // ============================================================
-// Descriptions (few-shot lives here)
+// Descriptions
 // ============================================================
 
 export const READ_FILE_DESCRIPTION = `
@@ -22,11 +22,10 @@ Read a text file from the workspace. Returns:
                  even when slicing). Pass this hash as 'expectedHash' to
                  edit_file to guard against stale content;
   • eol        — "\\n" or "\\r\\n";
-  • totalLines — line count in the full file (git convention);
+  • totalLines — line count in the full file;
   • isBinary   — if true, edit_file will refuse this path.
 
-Use read_file to obtain ground truth before any edit. Do NOT guess file
-content from memory: the file may have changed.
+Use read_file to obtain ground truth before any edit.
 
 EXAMPLES:
   read_file({ path: "src/app.ts" })
@@ -37,13 +36,11 @@ export const SEARCH_FILE_DESCRIPTION = `
 Find occurrences of a plain-text pattern in a file (case-sensitive by default).
 Returns:
   • matches      — [{ line, column, length, snippet, contextBefore, contextAfter }]
-  • hash         — current file hash (same as read_file's hash). Pass it
-                   straight to edit_file as 'expectedHash';
+  • hash         — current file hash. Pass it to edit_file as 'expectedHash';
   • totalMatches;
   • truncated    — true if there are more matches than maxResults.
 
-Use search_file to 'aim' before editing — confirm the exact text and its
-position before calling edit_file. Fewer failed edits, fewer tokens.
+Use search_file to 'aim' before editing.
 
 EXAMPLES:
   search_file({ path: "src/app.ts", pattern: "function foo" })
@@ -68,31 +65,35 @@ EDIT KINDS:
 
 TRANSACTIONS:
   • The first edit_file for a file starts a transaction. A byte-for-byte
-    backup of the original is saved under .mcp-edit/backups/<hash>/original.
-  • Subsequent edit_file calls APPEND to the active transaction.
+    backup of the original is saved under .editor/backups/<hash>/original,
+    and each successful edit_file creates a snapshot under
+    .editor/backups/<hash>/snapshots/NNNN.
+  • Subsequent edit_file calls APPEND to the active transaction — UNLESS you
+    have undone some edits: a new edit after undo_edit DISCARDS the redo
+    history (response includes 'redoDiscarded: N').
   • The file is written to disk on every edit_file — the transaction is a
     safety net, not a staging area.
-  • Call commit_file to finalize (delete backup) or rollback_file to restore
-    the original.
-  • Auto-rollback happens if a transaction is idle past MCP_EDIT_TIMEOUT_MS
-    (default 10 min) — but ONLY if the disk still matches the transaction.
-  • If the file is modified externally between edits, subsequent edit_file /
-    commit_file calls return STALE_CONTENT. Roll back to restore the
-    original, or re-read and start a new transaction.
+  • Call commit_file to finalize (delete backup + snapshots) or rollback_file
+    to restore the original.
+  • Call undo_edit / redo_edit to step back / forward within the transaction.
+  • Auto-rollback fires on idle past MCP_EDIT_TIMEOUT_MS (default 10 min) —
+    but ONLY if the disk still matches the transaction.
+  • If the file is modified externally, subsequent edit_file/undo_edit/
+    redo_edit/commit_file calls return STALE_CONTENT.
 
 RULES:
   • 'search' and 'anchor' must match EXACTLY — whitespace, case, indentation.
-    Include 2–3 adjacent lines of context to guarantee uniqueness.
+  • Include 2–3 adjacent lines of context to guarantee uniqueness.
   • For insert_before/insert_after, 'anchor' must be a full line.
   • If any edit fails, the whole batch is rejected — nothing is written.
   • STRONGLY RECOMMENDED: pass 'expectedHash' from the preceding read_file /
-    search_file (or the previous edit_file's returned hash). On mismatch you
-    get STALE_CONTENT.
+    search_file / edit_file's returned 'hash'.
   • 'replace_all' is NOT supported. Use one 'replace' per unique context.
 
 RESPONSE:
-  • diff, hash, editsApplied, linesBefore, linesAfter,
-    transactionId, editsCount (cumulative for the transaction).
+  • diff, hash, editsApplied (this call), linesBefore, linesAfter,
+    transactionId, pointer (edits currently applied), snapshotCount (max),
+    redoDiscarded (present only if a redo history was dropped).
 
 FEW-SHOT EXAMPLES:
 
@@ -104,7 +105,7 @@ Example 1 — fix a bug:
       replacement: "export function add(a: number, b: number): number {\\n  return a + b;\\n}" }
   ]
 
-Example 2 — add import AND field (order matters — replace sees the import):
+Example 2 — add import AND field (order matters):
   path: "src/user.ts"
   edits: [
     { kind: "insert_before",
@@ -128,47 +129,95 @@ Example 4 — with hash guard:
   edits: [ { kind: "replace", search: "…", replacement: "…" } ]
 `.trim();
 
+export const UNDO_EDIT_DESCRIPTION = `
+Step back N edits within the ACTIVE transaction (default: 1). Moves the
+internal pointer from P to P-N and restores the file from the corresponding
+snapshot. Returns the diff of what is being reverted (current → previous).
+
+CONSTRAINTS:
+  • Requires an active transaction (call edit_file first).
+  • 'steps' must be <= current 'pointer'.
+  • Fails with STALE_CONTENT if the file was modified externally since the
+    last edit.
+  • Does NOT delete the undone snapshots — they remain available via
+    redo_edit. New edit_file calls will DISCARD them.
+
+RESPONSE:
+  • transactionId, undoneSteps, pointer (new), snapshotCount (max),
+    hash (new current), diff (current → previous).
+
+EXAMPLES:
+  undo_edit({ path: "src/calc.ts" })              // undo 1 edit
+  undo_edit({ path: "src/calc.ts", steps: 3 })    // undo last 3 edits
+`.trim();
+
+export const REDO_EDIT_DESCRIPTION = `
+Step forward N edits within the ACTIVE transaction (default: 1). Re-applies
+previously-undone edits by moving the internal pointer from P to P+N and
+restoring the file from the corresponding snapshot. Returns the diff of what
+is being re-applied (current → next).
+
+CONSTRAINTS:
+  • Requires an active transaction.
+  • 'steps' must be <= (snapshotCount - pointer).
+  • Fails with STALE_CONTENT if the file was modified externally since the
+    last undo/redo/edit.
+
+RESPONSE:
+  • transactionId, redoneSteps, pointer (new), snapshotCount (max),
+    hash (new current), diff (current → next).
+
+EXAMPLES:
+  redo_edit({ path: "src/calc.ts" })              // redo 1 edit
+  redo_edit({ path: "src/calc.ts", steps: 3 })    // redo last 3 undone
+`.trim();
+
 export const COMMIT_FILE_DESCRIPTION = `
-Finalize the active transaction for a file. The current on-disk content
-becomes the "committed" state. Deletes the backup.
+Finalize the ACTIVE transaction for a file. The current on-disk content
+becomes the committed state. Deletes the backup (original) and all snapshots.
 
 Call only when you're confident the edits are correct (tests/lint pass).
 If the file was modified externally since the last edit, this returns
-STALE_CONTENT — roll back, or re-read and start a new transaction.
+STALE_CONTENT — roll back, or re-read and start over.
 
 RESPONSE:
-  • transactionId, editsCount, durationMs, finalHash
-  • diff — original → committed
+  • transactionId, editsCount (= current pointer), durationMs, finalHash
+  • diff — original → committed (the net change of the whole transaction)
 
 EXAMPLES:
   commit_file({ path: "src/calc.ts" })
 `.trim();
 
 export const ROLLBACK_FILE_DESCRIPTION = `
-Discard the active transaction for a file and restore its original content
+Discard the ACTIVE transaction for a file and restore its ORIGINAL content
 byte-for-byte (as it was before the first edit in the transaction). Deletes
-the backup.
+the backup and all snapshots.
 
-Use when edits broke something, or to start over cleanly.
-NOTE: any external changes made after the transaction started will be lost.
+NOTE: this ignores the current pointer — it always jumps back to the
+original, even if you had only undone some edits. Any external changes made
+after the transaction started will be lost.
 
 RESPONSE:
-  • transactionId, editsReverted, restoredHash
-  • diff — current → original (what is being undone)
+  • transactionId, editsReverted (= current pointer), restoredHash
+  • diff — current → original (what is being reverted)
 
 EXAMPLES:
   rollback_file({ path: "src/calc.ts" })
 `.trim();
 
 export const LIST_TRANSACTIONS_DESCRIPTION = `
-List active (uncommitted) transactions. Useful when you've lost track of
-what's in flight across sessions, or to see which files have pending
-backups.
+List ACTIVE (uncommitted) transactions. Useful when you've lost track of
+what's in flight across sessions, or to see which files have pending backups.
 
 RESPONSE:
-  • transactions: [{ transactionId, path, editsCount, createdAt, lastEditedAt,
+  • transactions: [{ transactionId, path, pointer, snapshotCount,
+                     canUndo, canRedo, createdAt, lastEditedAt,
                      ageSec, ttlRemainingSec }]
-  • timeoutMs: the auto-rollback timeout
+  • timeoutMs: the auto-rollback timeout.
+
+  • pointer === 0              → at original, only redo is possible
+  • pointer === snapshotCount  → at latest, only undo is possible
+  • snapshotCount - pointer > 0 → redo history available
 
 EXAMPLES:
   list_transactions()
@@ -185,6 +234,46 @@ export interface ToolDescriptor {
 }
 
 export function toolDescriptors(): ToolDescriptor[] {
+  const editSchema = {
+    oneOf: [
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["replace"] },
+          search: { type: "string" },
+          replacement: { type: "string" },
+        },
+        required: ["kind", "search", "replacement"],
+      },
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["insert_before"] },
+          anchor: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["kind", "anchor", "content"],
+      },
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["insert_after"] },
+          anchor: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["kind", "anchor", "content"],
+      },
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["delete"] },
+          search: { type: "string" },
+        },
+        required: ["kind", "search"],
+      },
+    ],
+  };
+
   return [
     {
       name: "read_file",
@@ -192,18 +281,9 @@ export function toolDescriptors(): ToolDescriptor[] {
       inputSchema: {
         type: "object",
         properties: {
-          path: {
-            type: "string",
-            description: "Absolute, or relative to workspace root.",
-          },
-          startLine: {
-            type: "number",
-            description: "1-based first line (inclusive).",
-          },
-          endLine: {
-            type: "number",
-            description: "1-based last line (inclusive).",
-          },
+          path: { type: "string" },
+          startLine: { type: "number" },
+          endLine: { type: "number" },
         },
         required: ["path"],
       },
@@ -215,10 +295,7 @@ export function toolDescriptors(): ToolDescriptor[] {
         type: "object",
         properties: {
           path: { type: "string" },
-          pattern: {
-            type: "string",
-            description: "Plain-text pattern (case-sensitive by default).",
-          },
+          pattern: { type: "string" },
           options: {
             type: "object",
             properties: {
@@ -237,58 +314,47 @@ export function toolDescriptors(): ToolDescriptor[] {
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Path to the file." },
-          expectedHash: {
-            type: "string",
-            description:
-              "Optional SHA-256 of the file from a prior read_file/search_file/edit_file. " +
-              "If provided and mismatched, the edit is rejected with STALE_CONTENT.",
-          },
+          path: { type: "string" },
+          expectedHash: { type: "string" },
           edits: {
             type: "array",
             minItems: 1,
-            items: {
-              oneOf: [
-                {
-                  type: "object",
-                  properties: {
-                    kind: { type: "string", enum: ["replace"] },
-                    search: { type: "string" },
-                    replacement: { type: "string" },
-                  },
-                  required: ["kind", "search", "replacement"],
-                },
-                {
-                  type: "object",
-                  properties: {
-                    kind: { type: "string", enum: ["insert_before"] },
-                    anchor: { type: "string" },
-                    content: { type: "string" },
-                  },
-                  required: ["kind", "anchor", "content"],
-                },
-                {
-                  type: "object",
-                  properties: {
-                    kind: { type: "string", enum: ["insert_after"] },
-                    anchor: { type: "string" },
-                    content: { type: "string" },
-                  },
-                  required: ["kind", "anchor", "content"],
-                },
-                {
-                  type: "object",
-                  properties: {
-                    kind: { type: "string", enum: ["delete"] },
-                    search: { type: "string" },
-                  },
-                  required: ["kind", "search"],
-                },
-              ],
-            },
+            items: editSchema,
           },
         },
         required: ["path", "edits"],
+      },
+    },
+    {
+      name: "undo_edit",
+      description: UNDO_EDIT_DESCRIPTION,
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          steps: {
+            type: "number",
+            default: 1,
+            description: "Number of edits to undo (>= 1).",
+          },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "redo_edit",
+      description: REDO_EDIT_DESCRIPTION,
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          steps: {
+            type: "number",
+            default: 1,
+            description: "Number of undone edits to redo (>= 1).",
+          },
+        },
+        required: ["path"],
       },
     },
     {
@@ -297,7 +363,7 @@ export function toolDescriptors(): ToolDescriptor[] {
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Path to the file." },
+          path: { type: "string" },
         },
         required: ["path"],
       },
@@ -308,7 +374,7 @@ export function toolDescriptors(): ToolDescriptor[] {
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Path to the file." },
+          path: { type: "string" },
         },
         required: ["path"],
       },
@@ -343,6 +409,23 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+function requireSteps(value: unknown): number {
+  if (value === undefined) return 1;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1
+  ) {
+    throw new StructuredError(
+      ErrorCode.INVALID_ARGUMENT,
+      "'steps' must be an integer >= 1.",
+      "Provide a positive integer 'steps', or omit it (default 1).",
+      { field: "steps" }
+    );
+  }
+  return value;
+}
+
 // ---------- read_file ----------
 
 export async function handleReadFile(
@@ -353,14 +436,9 @@ export async function handleReadFile(
     const pathArg = requireString(args?.path, "path");
     const abs = await resolveWorkspacePath(pathArg, state.config.workspaceRoot);
 
-    const startLine =
-      typeof args?.startLine === "number" ? args.startLine : undefined;
-    const endLine =
-      typeof args?.endLine === "number" ? args.endLine : undefined;
-
     const r = await readTextFile(abs, state.config.maxFileSizeBytes, {
-      startLine,
-      endLine,
+      startLine: typeof args?.startLine === "number" ? args.startLine : undefined,
+      endLine: typeof args?.endLine === "number" ? args.endLine : undefined,
     });
 
     return {
@@ -497,7 +575,6 @@ export async function handleEditFile(
       const existingTxn = state.transactions.get(abs);
 
       if (existingTxn) {
-        // Disk must still match the transaction's current hash.
         if (r.hash !== existingTxn.currentHash) {
           throw new StructuredError(
             ErrorCode.STALE_CONTENT,
@@ -512,12 +589,14 @@ export async function handleEditFile(
             }
           );
         }
-        // If caller passed expectedHash, it must match the transaction.
-        if (expectedHash !== undefined && expectedHash !== existingTxn.currentHash) {
+        if (
+          expectedHash !== undefined &&
+          expectedHash !== existingTxn.currentHash
+        ) {
           throw new StructuredError(
             ErrorCode.STALE_CONTENT,
             "'expectedHash' does not match the active transaction's current hash.",
-            "Use the 'hash' returned by the last edit_file call, or read_file.",
+            "Use the 'hash' returned by the last edit_file / undo_edit / redo_edit call.",
             {
               expectedHash,
               transactionHash: existingTxn.currentHash,
@@ -550,10 +629,16 @@ export async function handleEditFile(
         };
         if (existingTxn) {
           data.transactionId = existingTxn.transactionId;
-          data.editsCount = existingTxn.editsCount;
+          data.pointer = existingTxn.pointer;
+          data.snapshotCount = existingTxn.snapshotCount;
         }
         return { ok: true, data };
       }
+
+      const discardedRedos =
+        existingTxn && existingTxn.pointer < existingTxn.snapshotCount
+          ? existingTxn.snapshotCount - existingTxn.pointer
+          : 0;
 
       const record = await state.transactions.applyEdit({
         filePath: abs,
@@ -566,18 +651,61 @@ export async function handleEditFile(
       const displayName =
         path.relative(state.config.workspaceRoot, abs) || path.basename(abs);
 
-      return {
-        ok: true,
-        data: {
-          diff: formatUnifiedDiff(normalized, newNormalized, displayName),
-          hash: newHash,
-          editsApplied: editsRaw.length,
-          linesBefore: r.totalLines,
-          linesAfter: countLines(newNormalized),
-          transactionId: record.transactionId,
-          editsCount: record.editsCount,
-        },
+      const data: Record<string, unknown> = {
+        diff: formatUnifiedDiff(normalized, newNormalized, displayName),
+        hash: newHash,
+        editsApplied: editsRaw.length,
+        linesBefore: r.totalLines,
+        linesAfter: countLines(newNormalized),
+        transactionId: record.transactionId,
+        pointer: record.pointer,
+        snapshotCount: record.snapshotCount,
       };
+      if (discardedRedos > 0) data.redoDiscarded = discardedRedos;
+
+      return { ok: true, data };
+    });
+  } catch (err) {
+    return { ok: false, error: toStructured(err) };
+  }
+}
+
+// ---------- undo_edit ----------
+
+export async function handleUndoEdit(
+  args: any,
+  state: ServerState
+): Promise<ToolResult> {
+  try {
+    const pathArg = requireString(args?.path, "path");
+    const steps = requireSteps(args?.steps);
+    const abs = await resolveWorkspacePath(pathArg, state.config.workspaceRoot);
+    const mutex = state.getMutex(abs);
+
+    return await mutex.run(async (): Promise<ToolResult> => {
+      const result = await state.transactions.undo(abs, steps);
+      return { ok: true, data: result };
+    });
+  } catch (err) {
+    return { ok: false, error: toStructured(err) };
+  }
+}
+
+// ---------- redo_edit ----------
+
+export async function handleRedoEdit(
+  args: any,
+  state: ServerState
+): Promise<ToolResult> {
+  try {
+    const pathArg = requireString(args?.path, "path");
+    const steps = requireSteps(args?.steps);
+    const abs = await resolveWorkspacePath(pathArg, state.config.workspaceRoot);
+    const mutex = state.getMutex(abs);
+
+    return await mutex.run(async (): Promise<ToolResult> => {
+      const result = await state.transactions.redo(abs, steps);
+      return { ok: true, data: result };
     });
   } catch (err) {
     return { ok: false, error: toStructured(err) };
@@ -636,7 +764,10 @@ export async function handleListTransactions(
       transactionId: t.transactionId,
       path:
         path.relative(state.config.workspaceRoot, t.filePath) || t.filePath,
-      editsCount: t.editsCount,
+      pointer: t.pointer,
+      snapshotCount: t.snapshotCount,
+      canUndo: t.pointer > 0,
+      canRedo: t.pointer < t.snapshotCount,
       createdAt: t.createdAt,
       lastEditedAt: t.lastEditedAt,
       ageSec: Math.round((now - t.lastEditedAt) / 1000),

@@ -1,7 +1,7 @@
 {
   "name": "mcp-edit",
-  "version": "0.1.0",
-  "description": "Headless transactional editor for LLMs (MCP). Read-cycle: P0+P1.",
+  "version": "0.3.0",
+  "description": "Headless transactional editor for LLMs (MCP). P0+P1+P2: read, search, atomic batch edit.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -16,7 +16,8 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "diff": "^5.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

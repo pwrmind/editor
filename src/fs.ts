@@ -3,7 +3,7 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { StructuredError, ErrorCode } from "./errors.js";
 
-// ---- Mutex: FIFO-сериализация операций ----
+// ---- Mutex: FIFO per-key serialization ----
 
 export class Mutex {
   private queue: Promise<void> = Promise.resolve();
@@ -38,6 +38,23 @@ export function denormalizeEol(
   eol: "\n" | "\r\n"
 ): string {
   return eol === "\n" ? content : content.replace(/\n/g, "\r\n");
+}
+
+// ---- Lines ----
+
+/**
+ * Split LF-normalized text into lines using git convention:
+ * a trailing "\n" does not create an empty last line.
+ */
+export function splitLines(text: string): string[] {
+  if (text.length === 0) return [];
+  const parts = text.split("\n");
+  if (parts[parts.length - 1] === "") parts.pop();
+  return parts;
+}
+
+export function countLines(text: string): number {
+  return splitLines(text).length;
 }
 
 // ---- Hash ----
@@ -174,13 +191,7 @@ export async function readTextFile(
 
   const eol = detectEol(content);
   const normalized = normalizeEol(content);
-
-  // Считаем строки по git-конвенции: завершающий \n не создаёт «пустую» строку.
-  const allLines =
-    normalized === "" ? [] : normalized.split("\n");
-  if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
-    allLines.pop();
-  }
+  const allLines = splitLines(normalized);
   const totalLines = allLines.length;
 
   let resultContent = content;
@@ -213,7 +224,7 @@ export async function readTextFile(
   };
 }
 
-// ---- Atomic write (готов к P2, пока не используется) ----
+// ---- Atomic write ----
 
 export async function atomicWriteFile(
   filePath: string,

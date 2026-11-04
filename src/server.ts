@@ -3,17 +3,18 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Config } from "./config.js";
 import {
+  handleEditFile,
   handleReadFile,
   handleSearchFile,
   toolDescriptors,
   ToolResult,
 } from "./tools.js";
+import { ServerState } from "./state.js";
 
-export function createServer(config: Config): Server {
+export function createServer(state: ServerState): Server {
   const server = new Server(
-    { name: "mcp-edit", version: "0.1.0" },
+    { name: "mcp-edit", version: "0.3.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -23,14 +24,18 @@ export function createServer(config: Config): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    const a = args ?? {};
 
     let result: ToolResult;
     switch (name) {
       case "read_file":
-        result = await handleReadFile(args ?? {}, config);
+        result = await handleReadFile(a, state);
         break;
       case "search_file":
-        result = await handleSearchFile(args ?? {}, config);
+        result = await handleSearchFile(a, state);
+        break;
+      case "edit_file":
+        result = await handleEditFile(a, state);
         break;
       default:
         return {

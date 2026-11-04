@@ -1,4 +1,4 @@
-# editor
+# 📝 editor
 
 Headless transactional editor for LLMs, via MCP.
 

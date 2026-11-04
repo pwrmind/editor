@@ -55,7 +55,7 @@ edit("legacy.ts", [{ search: "function unused() {\n  return 42;\n}\n\n", replace
 
 - **Atomic batch** — all edits or none; validated before any write.
 - **Sequential edits** — each edit sees the previous one's result.
-- **Backups on disk** — byte-for-byte original under `.mcp-edit/backups/<hash>/original`,
+- **Backups on disk** — byte-for-byte original under `.editor/backups/<hash>/original`,
   survives crash/restart.
 - **Persistent state** — `state.json` reloaded on startup, active transactions resumed.
 - **Cross-process advisory lock** with stale-lock takeover.
@@ -81,14 +81,14 @@ MCP_EDIT_ROOT=/path/to/project node dist/index.js
 | Var | Default | Purpose |
 |---|---|---|
 | `MCP_EDIT_ROOT` | `process.cwd()` | Workspace root. **Must match your shell CWD** — otherwise `cat` and `edit` see different files. |
-| `MCP_EDIT_BACKUP_DIR` | `<root>/.mcp-edit` | Backups + `state.json` + locks. |
+| `MCP_EDIT_BACKUP_DIR` | `<root>/.editor` | Backups + `state.json` + locks. |
 | `MCP_EDIT_TIMEOUT_MS` | `600000` (10 min) | Auto-rollback TTL for idle transactions. |
 | `MCP_EDIT_MAX_FILE_SIZE` | `10485760` (10 MiB) | Per-file size cap. |
 
 ## On-disk layout
 
 ```
-<workspace>/.mcp-edit/
+<workspace>/.editor/
 ├── state.json                    # active transactions (v3)
 ├── backups/
 │   └── <sha256-16-of-path>/

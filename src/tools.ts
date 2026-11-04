@@ -43,7 +43,7 @@ FINDING A UNIQUE 'search' BLOCK:
 
 TRANSACTIONS:
   • The first edit starts a transaction and writes a byte-for-byte backup
-    under .mcp-edit/backups/<hash>/original.
+    under .editor/backups/<hash>/original.
   • Subsequent edits append to the active transaction.
   • The file is written to disk on every edit — the transaction is a safety
     net, not a staging area.
@@ -286,7 +286,7 @@ export async function handleEdit(
       const newHash = sha256(newFinal);
 
       // No net change + file exists → short-circuit.
-      if (r.exists && newFinal === normalizedOriginal) {
+      if (r.exists && newNormalized === normalizedOriginal) {
         const data: Record<string, unknown> = {
           diff: "",
           hash: r.hash,
@@ -301,7 +301,7 @@ export async function handleEdit(
 
       const record = await state.transactions.applyEdit({
         filePath: abs,
-        originalContent: normalizedOriginal,
+        originalContent: denormalizeEol(normalizedOriginal, r.eol),
         originalHash: r.hash,
         originalExisted: r.exists,
         newContent: newFinal,

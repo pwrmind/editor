@@ -222,6 +222,15 @@ export class TransactionManager {
             { expectedHash: opts.originalHash, actualHash: checkHash }
           );
         }
+      } else {
+        if (await fileExists(opts.filePath)) {
+          throw new StructuredError(
+            ErrorCode.STALE_CONTENT,
+            "File was created by another process between read and lock.",
+            "Re-read the file via shell and retry.",
+            { path: opts.filePath }
+          );
+        }
       }
 
       await fs.mkdir(dir, { recursive: true });

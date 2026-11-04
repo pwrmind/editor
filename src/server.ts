@@ -14,7 +14,7 @@ import { ServerState } from "./state.js";
 
 export function createServer(state: ServerState): Server {
   const server = new Server(
-    { name: "mcp-edit", version: "0.6.0" },
+    { name: "editor", version: "0.6.0" },
     { capabilities: { tools: {} } }
   );
 

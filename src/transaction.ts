@@ -65,7 +65,7 @@ export class TransactionManager {
       const parsed = JSON.parse(raw);
       if (parsed?.version !== STORE_VERSION) {
         console.error(
-          `[mcp-edit] state.json version ${parsed?.version} != ${STORE_VERSION}; ` +
+          `[editor] state.json version ${parsed?.version} != ${STORE_VERSION}; ` +
             `starting empty. Orphaned backups will be logged and left on disk.`
         );
         return;
@@ -76,11 +76,11 @@ export class TransactionManager {
       this.state = parsed;
     } catch (err: any) {
       if (err.code === "ENOENT") return;
-      console.error("[mcp-edit] failed to load state.json:", err.message);
+      console.error("[editor] failed to load state.json:", err.message);
       try {
         const corrupt = this.statePath + ".corrupt-" + Date.now();
         await fs.rename(this.statePath, corrupt);
-        console.error(`[mcp-edit] corrupt state.json moved to ${corrupt}`);
+        console.error(`[editor] corrupt state.json moved to ${corrupt}`);
       } catch {
         // ignore
       }
@@ -95,7 +95,7 @@ export class TransactionManager {
         await atomicWriteFile(this.statePath, snapshot);
       })
       .catch((err) => {
-        console.error("[mcp-edit] failed to save state.json:", err);
+        console.error("[editor] failed to save state.json:", err);
       });
     await this.saveQueue;
   }
@@ -108,7 +108,7 @@ export class TransactionManager {
 
       if (!backupOk) {
         console.error(
-          `[mcp-edit] txn ${t.transactionId}: backup missing for ${t.filePath}; removing record (file untouched)`
+          `[editor] txn ${t.transactionId}: backup missing for ${t.filePath}; removing record (file untouched)`
         );
         toRemove.add(t.transactionId);
         continue;
@@ -122,7 +122,7 @@ export class TransactionManager {
           const diskHash = sha256(raw);
           if (diskHash !== t.currentHash) {
             console.error(
-              `[mcp-edit] txn ${t.transactionId}: ${t.filePath} changed externally ` +
+              `[editor] txn ${t.transactionId}: ${t.filePath} changed externally ` +
                 `(expected ${t.currentHash}, actual ${diskHash}). ` +
                 `Transaction kept; use rollback to restore original, or commit to accept external.`
             );
@@ -149,7 +149,7 @@ export class TransactionManager {
       for (const d of dirs) {
         if (!known.has(d)) {
           console.error(
-            `[mcp-edit] orphaned backup directory: ${path.join(backupsDir, d)}`
+            `[editor] orphaned backup directory: ${path.join(backupsDir, d)}`
           );
         }
       }
@@ -419,7 +419,7 @@ export class TransactionManager {
 
       if (diskHash !== t.currentHash) {
         console.error(
-          `[mcp-edit] auto-rollback skipped for ${t.filePath}: ` +
+          `[editor] auto-rollback skipped for ${t.filePath}: ` +
             `disk hash differs (expected ${t.currentHash}, actual ${diskHash}). ` +
             `Manual rollback required.`
         );
@@ -444,12 +444,12 @@ export class TransactionManager {
         );
         rolledBack.push(t);
         console.error(
-          `[mcp-edit] auto-rollback: ${t.filePath} ` +
+          `[editor] auto-rollback: ${t.filePath} ` +
             `(idle ${Math.round((now - t.lastEditedAt) / 1000)}s)`
         );
       } catch (err: any) {
         console.error(
-          `[mcp-edit] auto-rollback failed for ${t.filePath}: ${err.message}`
+          `[editor] auto-rollback failed for ${t.filePath}: ${err.message}`
         );
       }
     }

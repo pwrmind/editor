@@ -1,11 +1,11 @@
 {
-  "name": "mcp-edit",
+  "name": "editor",
   "version": "0.6.0",
   "description": "Headless transactional editor for LLMs (MCP). 3 tools: edit, commit, rollback.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "mcp-edit": "dist/index.js"
+    "editor": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

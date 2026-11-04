@@ -1,4 +1,4 @@
-# mcp-edit
+# editor
 
 Headless transactional editor for LLMs, via MCP.
 

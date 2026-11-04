@@ -5,7 +5,7 @@ import { ServerState } from "./state.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  console.error("[editor] config:");
+  console.error("[mcp-edit] config:");
   console.error(`  workspaceRoot    = ${config.workspaceRoot}`);
   console.error(`  backupRoot       = ${config.backupRoot}`);
   console.error(`  timeoutMs        = ${config.timeoutMs}`);
@@ -16,7 +16,7 @@ async function main(): Promise<void> {
 
   const cleanupTimer = setInterval(() => {
     state.transactions.cleanupStale().catch((err) => {
-      console.error("[editor] cleanup error:", err);
+      console.error("[mcp-edit] cleanup error:", err);
     });
   }, 30_000);
   cleanupTimer.unref();
@@ -25,13 +25,10 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(
-    "[editor] running (stdio). Tools: read_file, search_file, edit_file, " +
-      "commit_file, rollback_file, list_transactions."
-  );
+  console.error("[mcp-edit] running (stdio). Tools: edit, commit, rollback.");
 
   const shutdown = async () => {
-    console.error("[editor] shutting down…");
+    console.error("[mcp-edit] shutting down…");
     clearInterval(cleanupTimer);
     await state.shutdown();
     process.exit(0);
@@ -41,6 +38,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[editor] fatal:", err);
+  console.error("[mcp-edit] fatal:", err);
   process.exit(1);
 });

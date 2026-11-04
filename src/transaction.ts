@@ -11,21 +11,20 @@ export interface TransactionRecord {
   filePath: string;
   fileHash: string;
   backupPath: string;
-  snapshotsDir: string;
-  pointer: number;
-  snapshotCount: number;
+  originalExisted: boolean;
   originalHash: string;
   currentHash: string;
   createdAt: number;
   lastEditedAt: number;
+  editsCount: number;
 }
 
 interface StoreData {
-  version: 2;
+  version: 3;
   transactions: TransactionRecord[];
 }
 
-const STORE_VERSION = 2;
+const STORE_VERSION = 3;
 
 export class TransactionManager {
   private state: StoreData = { version: STORE_VERSION, transactions: [] };
@@ -66,8 +65,8 @@ export class TransactionManager {
       const parsed = JSON.parse(raw);
       if (parsed?.version !== STORE_VERSION) {
         console.error(
-          `[editor] state.json version ${parsed?.version} != ${STORE_VERSION}; ` +
-            `starting with empty state. Orphaned backups will be logged and left on disk.`
+          `[mcp-edit] state.json version ${parsed?.version} != ${STORE_VERSION}; ` +
+            `starting empty. Orphaned backups will be logged and left on disk.`
         );
         return;
       }
@@ -77,11 +76,11 @@ export class TransactionManager {
       this.state = parsed;
     } catch (err: any) {
       if (err.code === "ENOENT") return;
-      console.error("[editor] failed to load state.json:", err.message);
+      console.error("[mcp-edit] failed to load state.json:", err.message);
       try {
         const corrupt = this.statePath + ".corrupt-" + Date.now();
         await fs.rename(this.statePath, corrupt);
-        console.error(`[editor] corrupt state.json moved to ${corrupt}`);
+        console.error(`[mcp-edit] corrupt state.json moved to ${corrupt}`);
       } catch {
         // ignore
       }
@@ -96,7 +95,7 @@ export class TransactionManager {
         await atomicWriteFile(this.statePath, snapshot);
       })
       .catch((err) => {
-        console.error("[editor] failed to save state.json:", err);
+        console.error("[mcp-edit] failed to save state.json:", err);
       });
     await this.saveQueue;
   }
@@ -106,52 +105,13 @@ export class TransactionManager {
 
     for (const t of this.state.transactions) {
       const backupOk = await fileExists(t.backupPath);
-      const fileOk = await fileExists(t.filePath);
 
       if (!backupOk) {
         console.error(
-          `[editor] txn ${t.transactionId}: backup missing for ${t.filePath}; removing record (file untouched)`
+          `[mcp-edit] txn ${t.transactionId}: backup missing for ${t.filePath}; removing record (file untouched)`
         );
         toRemove.add(t.transactionId);
         continue;
-      }
-
-      if (!fileOk) {
-        console.error(
-          `[editor] txn ${t.transactionId}: file missing for ${t.filePath}; restoring from backup`
-        );
-        try {
-          const raw = await fs.readFile(t.backupPath);
-          await fs.mkdir(path.dirname(t.filePath), { recursive: true });
-          await atomicWriteFile(t.filePath, raw.toString("utf-8"));
-          await fs.rm(path.dirname(t.backupPath), { recursive: true }).catch(() => {});
-        } catch (err: any) {
-          console.error(`[editor] restore failed: ${err.message}`);
-        }
-        toRemove.add(t.transactionId);
-        continue;
-      }
-
-      // Verify snapshotsDir + current pointer snapshot.
-      if (t.snapshotCount > 0) {
-        const dirOk = await dirExists(t.snapshotsDir);
-        if (!dirOk) {
-          console.error(
-            `[editor] txn ${t.transactionId}: snapshotsDir missing for ${t.filePath}; removing record`
-          );
-          toRemove.add(t.transactionId);
-          continue;
-        }
-        if (t.pointer > 0) {
-          const p = path.join(t.snapshotsDir, pad(t.pointer));
-          if (!(await fileExists(p))) {
-            console.error(
-              `[editor] txn ${t.transactionId}: snapshot[${t.pointer}] missing for ${t.filePath}; removing record`
-            );
-            toRemove.add(t.transactionId);
-            continue;
-          }
-        }
       }
 
       // Disk vs currentHash.
@@ -162,14 +122,14 @@ export class TransactionManager {
           const diskHash = sha256(raw);
           if (diskHash !== t.currentHash) {
             console.error(
-              `[editor] txn ${t.transactionId}: ${t.filePath} changed externally ` +
+              `[mcp-edit] txn ${t.transactionId}: ${t.filePath} changed externally ` +
                 `(expected ${t.currentHash}, actual ${diskHash}). ` +
-                `Transaction kept; use rollback_file to restore original.`
+                `Transaction kept; use rollback to restore original, or commit to accept external.`
             );
           }
         }
       } catch {
-        // ignore
+        // file missing — for created files this is expected on rollback-only
       }
     }
 
@@ -189,7 +149,7 @@ export class TransactionManager {
       for (const d of dirs) {
         if (!known.has(d)) {
           console.error(
-            `[editor] orphaned backup directory: ${path.join(backupsDir, d)}`
+            `[mcp-edit] orphaned backup directory: ${path.join(backupsDir, d)}`
           );
         }
       }
@@ -204,16 +164,11 @@ export class TransactionManager {
     return this.state.transactions.find((t) => t.filePath === filePath);
   }
 
-  all(): TransactionRecord[] {
-    return [...this.state.transactions];
-  }
-
   // ---- paths ----
 
   private backupPathFor(filePath: string): {
     dir: string;
     backupPath: string;
-    snapshotsDir: string;
     fileHash: string;
   } {
     const fileHash = createHash("sha256")
@@ -221,12 +176,7 @@ export class TransactionManager {
       .digest("hex")
       .slice(0, 16);
     const dir = path.join(this.backupRoot, "backups", fileHash);
-    return {
-      dir,
-      backupPath: path.join(dir, "original"),
-      snapshotsDir: path.join(dir, "snapshots"),
-      fileHash,
-    };
+    return { dir, backupPath: path.join(dir, "original"), fileHash };
   }
 
   // ---- applyEdit ----
@@ -235,6 +185,7 @@ export class TransactionManager {
     filePath: string;
     originalContent: string;
     originalHash: string;
+    originalExisted: boolean;
     newContent: string;
     newHash: string;
   }): Promise<TransactionRecord> {
@@ -247,12 +198,11 @@ export class TransactionManager {
     filePath: string;
     originalContent: string;
     originalHash: string;
+    originalExisted: boolean;
     newContent: string;
     newHash: string;
   }): Promise<TransactionRecord> {
-    const { dir, backupPath, snapshotsDir, fileHash } = this.backupPathFor(
-      opts.filePath
-    );
+    const { dir, backupPath, fileHash } = this.backupPathFor(opts.filePath);
     const transactionId = `tx-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
@@ -260,21 +210,22 @@ export class TransactionManager {
     await this.locks.acquire(fileHash, transactionId);
 
     try {
-      // Race guard: re-read after acquiring lock.
-      const raw = await fs.readFile(opts.filePath);
-      const checkHash = sha256(raw);
-      if (checkHash !== opts.originalHash) {
-        throw new StructuredError(
-          ErrorCode.STALE_CONTENT,
-          "File changed between read and lock acquisition.",
-          "Re-read the file (read_file) and retry with the fresh hash.",
-          { expectedHash: opts.originalHash, actualHash: checkHash }
-        );
+      // Race guard for existing files.
+      if (opts.originalExisted) {
+        const raw = await fs.readFile(opts.filePath);
+        const checkHash = sha256(raw);
+        if (checkHash !== opts.originalHash) {
+          throw new StructuredError(
+            ErrorCode.STALE_CONTENT,
+            "File changed between read and lock acquisition.",
+            "Re-read the file via shell and retry.",
+            { expectedHash: opts.originalHash, actualHash: checkHash }
+          );
+        }
       }
 
-      await fs.mkdir(snapshotsDir, { recursive: true });
+      await fs.mkdir(dir, { recursive: true });
       await atomicWriteFile(backupPath, opts.originalContent);
-      await atomicWriteFile(path.join(snapshotsDir, "0001"), opts.newContent);
       await atomicWriteFile(opts.filePath, opts.newContent);
 
       const record: TransactionRecord = {
@@ -282,13 +233,12 @@ export class TransactionManager {
         filePath: opts.filePath,
         fileHash,
         backupPath,
-        snapshotsDir,
-        pointer: 1,
-        snapshotCount: 1,
+        originalExisted: opts.originalExisted,
         originalHash: opts.originalHash,
         currentHash: opts.newHash,
         createdAt: Date.now(),
         lastEditedAt: Date.now(),
+        editsCount: 1,
       };
       this.state.transactions.push(record);
       await this.save();
@@ -310,194 +260,18 @@ export class TransactionManager {
       throw new StructuredError(
         ErrorCode.TRANSACTION_CONFLICT,
         "Transaction lock was lost to another process.",
-        "Roll back to a known state, or re-read and start a new transaction.",
+        "Roll back to a known state, or start a new transaction.",
         { filePath: existing.filePath, transactionId: existing.transactionId }
       );
     }
 
-    // Truncate redo history if we're not at the tip.
-    if (existing.pointer < existing.snapshotCount) {
-      for (let i = existing.pointer + 1; i <= existing.snapshotCount; i++) {
-        await fs
-          .unlink(path.join(existing.snapshotsDir, pad(i)))
-          .catch(() => {});
-      }
-      existing.snapshotCount = existing.pointer;
-    }
-
-    const newIndex = existing.pointer + 1;
-    await atomicWriteFile(
-      path.join(existing.snapshotsDir, pad(newIndex)),
-      newContent
-    );
     await atomicWriteFile(existing.filePath, newContent);
 
-    existing.pointer = newIndex;
-    existing.snapshotCount = newIndex;
     existing.currentHash = newHash;
     existing.lastEditedAt = Date.now();
+    existing.editsCount += 1;
     await this.save();
     return existing;
-  }
-
-  // ---- undo / redo ----
-
-  async undo(
-    filePath: string,
-    steps: number
-  ): Promise<{
-    transactionId: string;
-    undoneSteps: number;
-    pointer: number;
-    snapshotCount: number;
-    hash: string;
-    diff: string;
-  }> {
-    const record = this.get(filePath);
-    if (!record) {
-      throw new StructuredError(
-        ErrorCode.NO_ACTIVE_TRANSACTION,
-        `No active transaction for ${filePath}.`,
-        "Call edit_file first to start a transaction.",
-        { path: filePath }
-      );
-    }
-    if (record.pointer === 0) {
-      throw new StructuredError(
-        ErrorCode.UNDO_LIMIT,
-        "Nothing to undo — already at the original state.",
-        "Only edit_file advances the pointer; undo cannot go below 0.",
-        { path: filePath, pointer: record.pointer }
-      );
-    }
-    if (steps > record.pointer) {
-      throw new StructuredError(
-        ErrorCode.UNDO_LIMIT,
-        `Requested ${steps} step(s) but only ${record.pointer} are available.`,
-        `Reduce 'steps' to <= ${record.pointer}.`,
-        { path: filePath, requested: steps, available: record.pointer }
-      );
-    }
-
-    // External change guard.
-    const diskRaw = await fs.readFile(record.filePath);
-    const diskHash = sha256(diskRaw);
-    if (diskHash !== record.currentHash) {
-      throw new StructuredError(
-        ErrorCode.STALE_CONTENT,
-        "File changed externally since the last edit.",
-        "Roll back the transaction (rollback_file) or re-read and start over.",
-        { expectedHash: record.currentHash, actualHash: diskHash }
-      );
-    }
-
-    const oldLf = normalizeEol(diskRaw.toString("utf-8"));
-    const newPointer = record.pointer - steps;
-    const restored =
-      newPointer === 0
-        ? (await fs.readFile(record.backupPath)).toString("utf-8")
-        : (
-            await fs.readFile(
-              path.join(record.snapshotsDir, pad(newPointer))
-            )
-          ).toString("utf-8");
-    const newHash = sha256(restored);
-
-    await atomicWriteFile(record.filePath, restored);
-
-    record.pointer = newPointer;
-    record.currentHash = newHash;
-    record.lastEditedAt = Date.now();
-    await this.save();
-
-    const newLf = normalizeEol(restored);
-    const diff = formatUnifiedDiff(oldLf, newLf, path.basename(filePath));
-
-    return {
-      transactionId: record.transactionId,
-      undoneSteps: steps,
-      pointer: record.pointer,
-      snapshotCount: record.snapshotCount,
-      hash: newHash,
-      diff,
-    };
-  }
-
-  async redo(
-    filePath: string,
-    steps: number
-  ): Promise<{
-    transactionId: string;
-    redoneSteps: number;
-    pointer: number;
-    snapshotCount: number;
-    hash: string;
-    diff: string;
-  }> {
-    const record = this.get(filePath);
-    if (!record) {
-      throw new StructuredError(
-        ErrorCode.NO_ACTIVE_TRANSACTION,
-        `No active transaction for ${filePath}.`,
-        "Call edit_file first to start a transaction.",
-        { path: filePath }
-      );
-    }
-    const available = record.snapshotCount - record.pointer;
-    if (available === 0) {
-      throw new StructuredError(
-        ErrorCode.UNDO_LIMIT,
-        "Nothing to redo — already at the latest snapshot.",
-        "Make a new edit_file call, or use undo_edit to go back first.",
-        { path: filePath, pointer: record.pointer, snapshotCount: record.snapshotCount }
-      );
-    }
-    if (steps > available) {
-      throw new StructuredError(
-        ErrorCode.UNDO_LIMIT,
-        `Requested ${steps} step(s) but only ${available} are available.`,
-        `Reduce 'steps' to <= ${available}.`,
-        { path: filePath, requested: steps, available }
-      );
-    }
-
-    // External change guard.
-    const diskRaw = await fs.readFile(record.filePath);
-    const diskHash = sha256(diskRaw);
-    if (diskHash !== record.currentHash) {
-      throw new StructuredError(
-        ErrorCode.STALE_CONTENT,
-        "File changed externally since the last edit.",
-        "Roll back the transaction (rollback_file) or re-read and start over.",
-        { expectedHash: record.currentHash, actualHash: diskHash }
-      );
-    }
-
-    const oldLf = normalizeEol(diskRaw.toString("utf-8"));
-    const newPointer = record.pointer + steps;
-    const restored = (
-      await fs.readFile(path.join(record.snapshotsDir, pad(newPointer)))
-    ).toString("utf-8");
-    const newHash = sha256(restored);
-
-    await atomicWriteFile(record.filePath, restored);
-
-    record.pointer = newPointer;
-    record.currentHash = newHash;
-    record.lastEditedAt = Date.now();
-    await this.save();
-
-    const newLf = normalizeEol(restored);
-    const diff = formatUnifiedDiff(oldLf, newLf, path.basename(filePath));
-
-    return {
-      transactionId: record.transactionId,
-      redoneSteps: steps,
-      pointer: record.pointer,
-      snapshotCount: record.snapshotCount,
-      hash: newHash,
-      diff,
-    };
   }
 
   // ---- commit / rollback ----
@@ -514,7 +288,7 @@ export class TransactionManager {
       throw new StructuredError(
         ErrorCode.NO_ACTIVE_TRANSACTION,
         `No active transaction for ${filePath}.`,
-        "Call edit_file first to start a transaction.",
+        "Call edit first to start a transaction.",
         { path: filePath }
       );
     }
@@ -525,7 +299,8 @@ export class TransactionManager {
       throw new StructuredError(
         ErrorCode.STALE_CONTENT,
         "File changed externally since the last edit.",
-        "Roll back the transaction (rollback_file), or re-read and start over.",
+        "Roll back to restore original, or accept the external change by " +
+          "rolling back first and editing again.",
         { expectedHash: record.currentHash, actualHash: currentHash }
       );
     }
@@ -549,7 +324,7 @@ export class TransactionManager {
 
     return {
       transactionId: record.transactionId,
-      editsCount: record.pointer,
+      editsCount: record.editsCount,
       durationMs: Date.now() - record.createdAt,
       finalHash: record.currentHash,
       diff,
@@ -558,7 +333,7 @@ export class TransactionManager {
 
   async rollback(filePath: string): Promise<{
     transactionId: string;
-    editsReverted: number;
+    editsRestored: number;
     restoredHash: string;
     diff: string;
   }> {
@@ -573,8 +348,7 @@ export class TransactionManager {
     }
 
     const backupRaw = await fs.readFile(record.backupPath);
-    const backupText = backupRaw.toString("utf-8");
-    const restoredHash = sha256(backupRaw);
+    const backupContent = backupRaw.toString("utf-8");
 
     let currentLf = "";
     try {
@@ -583,15 +357,20 @@ export class TransactionManager {
     } catch {
       // file gone — diff against empty
     }
-
-    const originalLf = normalizeEol(backupText);
+    const originalLf = normalizeEol(backupContent);
     const diff = formatUnifiedDiff(
       currentLf,
       originalLf,
       path.basename(record.filePath)
     );
 
-    await atomicWriteFile(record.filePath, backupText);
+    if (record.originalExisted) {
+      await atomicWriteFile(record.filePath, backupContent);
+    } else {
+      // Created file → delete to restore "no file" state.
+      await fs.unlink(record.filePath).catch(() => {});
+    }
+
     await fs.rm(path.dirname(record.backupPath), { recursive: true }).catch(() => {});
     await this.locks.release(record.fileHash);
 
@@ -600,9 +379,13 @@ export class TransactionManager {
     );
     await this.save();
 
+    const restoredHash = record.originalExisted
+      ? sha256(backupContent)
+      : sha256("");
+
     return {
       transactionId: record.transactionId,
-      editsReverted: record.pointer,
+      editsRestored: record.editsCount,
       restoredHash,
       diff,
     };
@@ -627,7 +410,7 @@ export class TransactionManager {
 
       if (diskHash !== t.currentHash) {
         console.error(
-          `[editor] auto-rollback skipped for ${t.filePath}: ` +
+          `[mcp-edit] auto-rollback skipped for ${t.filePath}: ` +
             `disk hash differs (expected ${t.currentHash}, actual ${diskHash}). ` +
             `Manual rollback required.`
         );
@@ -636,10 +419,15 @@ export class TransactionManager {
 
       try {
         const backupRaw = await fs.readFile(t.backupPath);
-        await atomicWriteFile(t.filePath, backupRaw.toString("utf-8"));
-        await fs
-          .rm(path.dirname(t.backupPath), { recursive: true })
-          .catch(() => {});
+        const backupContent = backupRaw.toString("utf-8");
+
+        if (t.originalExisted) {
+          await atomicWriteFile(t.filePath, backupContent);
+        } else {
+          await fs.unlink(t.filePath).catch(() => {});
+        }
+
+        await fs.rm(path.dirname(t.backupPath), { recursive: true }).catch(() => {});
         await this.locks.release(t.fileHash);
 
         this.state.transactions = this.state.transactions.filter(
@@ -647,12 +435,12 @@ export class TransactionManager {
         );
         rolledBack.push(t);
         console.error(
-          `[editor] auto-rollback: ${t.filePath} ` +
+          `[mcp-edit] auto-rollback: ${t.filePath} ` +
             `(idle ${Math.round((now - t.lastEditedAt) / 1000)}s)`
         );
       } catch (err: any) {
         console.error(
-          `[editor] auto-rollback failed for ${t.filePath}: ${err.message}`
+          `[mcp-edit] auto-rollback failed for ${t.filePath}: ${err.message}`
         );
       }
     }
@@ -664,25 +452,10 @@ export class TransactionManager {
   }
 }
 
-// ---- helpers ----
-
-function pad(n: number): string {
-  return String(n).padStart(4, "0");
-}
-
 async function fileExists(p: string): Promise<boolean> {
   try {
     const st = await fs.stat(p);
     return st.isFile();
-  } catch {
-    return false;
-  }
-}
-
-async function dirExists(p: string): Promise<boolean> {
-  try {
-    const st = await fs.stat(p);
-    return st.isDirectory();
   } catch {
     return false;
   }

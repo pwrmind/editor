@@ -4,14 +4,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
-  handleCommitFile,
-  handleEditFile,
-  handleListTransactions,
-  handleReadFile,
-  handleRedoEdit,
-  handleRollbackFile,
-  handleSearchFile,
-  handleUndoEdit,
+  handleCommit,
+  handleEdit,
+  handleRollback,
   toolDescriptors,
   ToolResult,
 } from "./tools.js";
@@ -19,7 +14,7 @@ import { ServerState } from "./state.js";
 
 export function createServer(state: ServerState): Server {
   const server = new Server(
-    { name: "editor", version: "0.5.0" },
+    { name: "mcp-edit", version: "0.6.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -33,29 +28,14 @@ export function createServer(state: ServerState): Server {
 
     let result: ToolResult;
     switch (name) {
-      case "read_file":
-        result = await handleReadFile(a, state);
+      case "edit":
+        result = await handleEdit(a, state);
         break;
-      case "search_file":
-        result = await handleSearchFile(a, state);
+      case "commit":
+        result = await handleCommit(a, state);
         break;
-      case "edit_file":
-        result = await handleEditFile(a, state);
-        break;
-      case "undo_edit":
-        result = await handleUndoEdit(a, state);
-        break;
-      case "redo_edit":
-        result = await handleRedoEdit(a, state);
-        break;
-      case "commit_file":
-        result = await handleCommitFile(a, state);
-        break;
-      case "rollback_file":
-        result = await handleRollbackFile(a, state);
-        break;
-      case "list_transactions":
-        result = await handleListTransactions(a, state);
+      case "rollback":
+        result = await handleRollback(a, state);
         break;
       default:
         return {

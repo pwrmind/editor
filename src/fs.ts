@@ -3,7 +3,7 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { StructuredError, ErrorCode } from "./errors.js";
 
-// ---- Mutex: FIFO per-key serialization ----
+// ---- Mutex ----
 
 export class Mutex {
   private queue: Promise<void> = Promise.resolve();
@@ -42,10 +42,6 @@ export function denormalizeEol(
 
 // ---- Lines ----
 
-/**
- * Split LF-normalized text into lines using git convention:
- * a trailing "\n" does not create an empty last line.
- */
 export function splitLines(text: string): string[] {
   if (text.length === 0) return [];
   const parts = text.split("\n");
@@ -124,7 +120,7 @@ export function looksBinary(buf: Buffer): boolean {
   return false;
 }
 
-// ---- Read ----
+// ---- Read (internal, not exposed as a tool) ----
 
 export interface ReadResult {
   content: string;
@@ -133,20 +129,23 @@ export interface ReadResult {
   eol: "\n" | "\r\n";
   totalLines: number;
   isBinary: boolean;
+  exists: boolean;
 }
 
 export async function readTextFile(
   absolutePath: string,
-  maxSizeBytes: number,
-  range?: { startLine?: number; endLine?: number }
+  maxSizeBytes: number
 ): Promise<ReadResult> {
   if (!(await fileExists(absolutePath))) {
-    throw new StructuredError(
-      ErrorCode.FILE_NOT_FOUND,
-      `File "${absolutePath}" not found.`,
-      "Check the path.",
-      { path: absolutePath }
-    );
+    return {
+      content: "",
+      rawSize: 0,
+      hash: sha256(""),
+      eol: "\n",
+      totalLines: 0,
+      isBinary: false,
+      exists: false,
+    };
   }
 
   const stat = await fs.stat(absolutePath);
@@ -170,6 +169,7 @@ export async function readTextFile(
       eol: "\n",
       totalLines: 0,
       isBinary: true,
+      exists: true,
     };
   }
 
@@ -187,36 +187,15 @@ export async function readTextFile(
 
   const eol = detectEol(content);
   const normalized = normalizeEol(content);
-  const allLines = splitLines(normalized);
-  const totalLines = allLines.length;
-
-  let resultContent = content;
-
-  if (
-    range &&
-    (range.startLine !== undefined || range.endLine !== undefined)
-  ) {
-    const start = Math.max(1, range.startLine ?? 1);
-    const end = Math.min(totalLines, range.endLine ?? totalLines);
-    if (start > end) {
-      throw new StructuredError(
-        ErrorCode.INVALID_ARGUMENT,
-        `startLine (${start}) > endLine (${end}).`,
-        "Provide startLine <= endLine.",
-        { startLine: start, endLine: end }
-      );
-    }
-    const joiner = eol === "\r\n" ? "\r\n" : "\n";
-    resultContent = allLines.slice(start - 1, end).join(joiner);
-  }
 
   return {
-    content: resultContent,
+    content: normalized,
     rawSize: raw.length,
     hash,
     eol,
-    totalLines,
+    totalLines: countLines(normalized),
     isBinary: false,
+    exists: true,
   };
 }
 
@@ -227,6 +206,8 @@ export async function atomicWriteFile(
   content: string
 ): Promise<void> {
   const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true });
+
   const base = path.basename(filePath);
   const tmp = path.join(
     dir,

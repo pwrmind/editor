@@ -2,16 +2,19 @@ import { createTwoFilesPatch } from "diff";
 import { ErrorCode, StructuredError } from "./errors.js";
 import { normalizeEol } from "./fs.js";
 
-export type Edit =
-  | { kind: "replace"; search: string; replacement: string }
-  | { kind: "insert_before"; anchor: string; content: string }
-  | { kind: "insert_after"; anchor: string; content: string }
-  | { kind: "delete"; search: string };
+export interface Edit {
+  search: string;
+  replacement: string;
+}
 
 /**
  * Applies edits to LF-normalized content SEQUENTIALLY.
- * Each edit sees the result of previous ones. On any error, throws
- * StructuredError — the caller MUST NOT write anything to disk.
+ * Each edit sees the result of previous ones. On any error, throws —
+ * the caller MUST NOT write anything to disk.
+ *
+ * Special case: search === "" means "the file is empty/new".
+ *   - current === "" → returns replacement (create / fill empty)
+ *   - current !== "" → INVALID_ARGUMENT
  */
 export function applyEdits(originalLf: string, edits: Edit[]): string {
   let current = originalLf;
@@ -22,43 +25,39 @@ export function applyEdits(originalLf: string, edits: Edit[]): string {
 }
 
 function applyOne(current: string, edit: Edit, editIndex: number): string {
-  if (!edit || typeof edit !== "object" || typeof (edit as any).kind !== "string") {
+  if (
+    !edit ||
+    typeof edit !== "object" ||
+    typeof (edit as any).search !== "string" ||
+    typeof (edit as any).replacement !== "string"
+  ) {
     throw new StructuredError(
       ErrorCode.INVALID_ARGUMENT,
-      `edit[${editIndex}] must be an object with a 'kind' field.`,
-      "Each edit must have kind: 'replace' | 'insert_before' | 'insert_after' | 'delete'.",
+      `edit[${editIndex}] must be { search: string, replacement: string }.`,
+      "Provide both fields as strings. To delete a block, use replacement: ''.",
       { editIndex }
     );
   }
 
-  switch (edit.kind) {
-    case "replace":
-      return applyReplace(current, edit, editIndex);
-    case "delete":
-      return applyDelete(current, edit, editIndex);
-    case "insert_before":
-      return applyInsertBefore(current, edit, editIndex);
-    case "insert_after":
-      return applyInsertAfter(current, edit, editIndex);
-    default:
-      throw new StructuredError(
-        ErrorCode.INVALID_ARGUMENT,
-        `edit[${editIndex}]: unknown kind '${(edit as any).kind}'.`,
-        "Supported kinds: replace, insert_before, insert_after, delete. " +
-          "(replace_all is not supported yet.)",
-        { editIndex, kind: (edit as any).kind }
-      );
+  const search = normalizeEol(edit.search);
+  const replacement = normalizeEol(edit.replacement);
+
+  // ---- Special case: create / fill empty file ----
+  if (search === "") {
+    if (current === "") {
+      return replacement;
+    }
+    throw new StructuredError(
+      ErrorCode.INVALID_ARGUMENT,
+      `edit[${editIndex}]: 'search: ""' can only be used on an empty file.`,
+      "The file already has content. To replace it, use the current content " +
+        "as 'search' (read it via shell: cat / Get-Content). " +
+        "To create a new file, ensure it doesn't exist yet.",
+      { editIndex, fileHasContent: true, currentLength: current.length }
+    );
   }
-}
 
-function applyReplace(
-  current: string,
-  edit: { search: string; replacement: string },
-  editIndex: number
-): string {
-  const search = requireNonEmpty(normalizeEol(edit.search), "search", editIndex);
-  const replacement = normalizeEol(edit.replacement ?? "");
-
+  // ---- Normal replace ----
   if (search === replacement) {
     throw new StructuredError(
       ErrorCode.INVALID_ARGUMENT,
@@ -68,138 +67,31 @@ function applyReplace(
     );
   }
 
-  requireUnique(current, search, editIndex, "search");
-  return current.replace(search, replacement);
-}
-
-function applyDelete(
-  current: string,
-  edit: { search: string },
-  editIndex: number
-): string {
-  const search = requireNonEmpty(normalizeEol(edit.search), "search", editIndex);
-  requireUnique(current, search, editIndex, "search");
-  return current.replace(search, "");
-}
-
-function applyInsertBefore(
-  current: string,
-  edit: { anchor: string; content: string },
-  editIndex: number
-): string {
-  const anchor = requireNonEmpty(normalizeEol(edit.anchor), "anchor", editIndex);
-  const content = requireNonEmpty(
-    normalizeEol(edit.content ?? ""),
-    "content",
-    editIndex
-  );
-
-  requireUnique(current, anchor, editIndex, "anchor");
-
-  const pos = current.indexOf(anchor);
-
-  if (pos !== 0 && current[pos - 1] !== "\n") {
-    throw new StructuredError(
-      ErrorCode.INVALID_ARGUMENT,
-      `edit[${editIndex}]: 'anchor' does not start at the beginning of a line.`,
-      "insert_before requires 'anchor' to be a full line starting at column 0. " +
-        "Include the line's leading whitespace (indentation).",
-      { editIndex, anchorPreview: preview(anchor), position: pos }
-    );
-  }
-
-  const body = content.endsWith("\n") ? content : content + "\n";
-  return current.slice(0, pos) + body + current.slice(pos);
-}
-
-function applyInsertAfter(
-  current: string,
-  edit: { anchor: string; content: string },
-  editIndex: number
-): string {
-  const anchor = requireNonEmpty(normalizeEol(edit.anchor), "anchor", editIndex);
-  const content = requireNonEmpty(
-    normalizeEol(edit.content ?? ""),
-    "content",
-    editIndex
-  );
-
-  requireUnique(current, anchor, editIndex, "anchor");
-
-  const anchorEnd = current.indexOf(anchor) + anchor.length;
-  let insertAt: number;
-  let needsLeadingNewline = false;
-
-  if (anchor.endsWith("\n")) {
-    insertAt = anchorEnd;
-  } else if (anchorEnd === current.length) {
-    insertAt = anchorEnd;
-    needsLeadingNewline = true;
-  } else if (current[anchorEnd] === "\n") {
-    insertAt = anchorEnd + 1;
-  } else {
-    throw new StructuredError(
-      ErrorCode.INVALID_ARGUMENT,
-      `edit[${editIndex}]: 'anchor' does not end at the end of a line.`,
-      "insert_after requires 'anchor' to be a full line (end with '\\n' or reach EOF, " +
-        "or be followed by '\\n'). Extend the anchor to a complete line.",
-      { editIndex, anchorPreview: preview(anchor), position: anchorEnd }
-    );
-  }
-
-  const body = content.endsWith("\n") ? content : content + "\n";
-  const insert = needsLeadingNewline ? "\n" + body : body;
-  return current.slice(0, insertAt) + insert + current.slice(insertAt);
-}
-
-function requireNonEmpty(
-  value: string,
-  field: string,
-  editIndex: number
-): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new StructuredError(
-      ErrorCode.INVALID_ARGUMENT,
-      `edit[${editIndex}]: '${field}' must be a non-empty string.`,
-      `Provide a non-empty '${field}'.`,
-      { editIndex, field }
-    );
-  }
-  return value;
-}
-
-function requireUnique(
-  haystack: string,
-  needle: string,
-  editIndex: number,
-  field: "search" | "anchor"
-): void {
-  const count = haystack.split(needle).length - 1;
+  const count = current.split(search).length - 1;
 
   if (count === 0) {
-    const code =
-      field === "search" ? ErrorCode.SEARCH_NOT_FOUND : ErrorCode.ANCHOR_NOT_FOUND;
     throw new StructuredError(
-      code,
-      `edit[${editIndex}]: '${field}' not found.`,
-      `Verify exact text: indentation (spaces vs tabs), case, EOL. ` +
-        `Re-read the file (read_file) and copy the block verbatim.`,
-      { editIndex, [`${field}Preview`]: preview(needle) }
+      ErrorCode.SEARCH_NOT_FOUND,
+      `edit[${editIndex}]: 'search' not found.`,
+      "Verify exact text: indentation (spaces vs tabs), case, EOL. " +
+        "Read the file via shell (cat / Get-Content) and copy the block verbatim, " +
+        "including 2–3 adjacent lines for uniqueness.",
+      { editIndex, searchPreview: preview(search) }
     );
   }
 
   if (count > 1) {
-    const code =
-      field === "search" ? ErrorCode.SEARCH_AMBIGUOUS : ErrorCode.ANCHOR_AMBIGUOUS;
-    const lines = findOccurrenceLines(haystack, needle);
+    const lines = findOccurrenceLines(current, search);
     throw new StructuredError(
-      code,
-      `edit[${editIndex}]: '${field}' found ${count} times.`,
-      `Extend '${field}' with 2-3 adjacent lines for uniqueness. ` +
+      ErrorCode.SEARCH_AMBIGUOUS,
+      `edit[${editIndex}]: 'search' found ${count} times.`,
+      `Extend 'search' with 2–3 adjacent lines for uniqueness. ` +
         `Candidate line numbers: ${lines.join(", ")}.`,
       { editIndex, occurrences: count, lines }
     );
   }
+
+  return current.replace(search, replacement);
 }
 
 function findOccurrenceLines(haystack: string, needle: string): number[] {

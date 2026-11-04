@@ -4,8 +4,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  handleCommitFile,
   handleEditFile,
+  handleListTransactions,
   handleReadFile,
+  handleRollbackFile,
   handleSearchFile,
   toolDescriptors,
   ToolResult,
@@ -14,7 +17,7 @@ import { ServerState } from "./state.js";
 
 export function createServer(state: ServerState): Server {
   const server = new Server(
-    { name: "mcp-edit", version: "0.3.0" },
+    { name: "mcp-edit", version: "0.4.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -36,6 +39,15 @@ export function createServer(state: ServerState): Server {
         break;
       case "edit_file":
         result = await handleEditFile(a, state);
+        break;
+      case "commit_file":
+        result = await handleCommitFile(a, state);
+        break;
+      case "rollback_file":
+        result = await handleRollbackFile(a, state);
+        break;
+      case "list_transactions":
+        result = await handleListTransactions(a, state);
         break;
       default:
         return {

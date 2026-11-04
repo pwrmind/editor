@@ -51,8 +51,6 @@ function applyOne(current: string, edit: Edit, editIndex: number): string {
   }
 }
 
-// ---- replace ----
-
 function applyReplace(
   current: string,
   edit: { search: string; replacement: string },
@@ -74,8 +72,6 @@ function applyReplace(
   return current.replace(search, replacement);
 }
 
-// ---- delete ----
-
 function applyDelete(
   current: string,
   edit: { search: string },
@@ -85,8 +81,6 @@ function applyDelete(
   requireUnique(current, search, editIndex, "search");
   return current.replace(search, "");
 }
-
-// ---- insert_before ----
 
 function applyInsertBefore(
   current: string,
@@ -104,7 +98,6 @@ function applyInsertBefore(
 
   const pos = current.indexOf(anchor);
 
-  // Anchor must START at a line boundary (column 0 of a line, or file start).
   if (pos !== 0 && current[pos - 1] !== "\n") {
     throw new StructuredError(
       ErrorCode.INVALID_ARGUMENT,
@@ -118,8 +111,6 @@ function applyInsertBefore(
   const body = content.endsWith("\n") ? content : content + "\n";
   return current.slice(0, pos) + body + current.slice(pos);
 }
-
-// ---- insert_after ----
 
 function applyInsertAfter(
   current: string,
@@ -140,15 +131,11 @@ function applyInsertAfter(
   let needsLeadingNewline = false;
 
   if (anchor.endsWith("\n")) {
-    // Anchor already ends at a line terminator; insert straight after it.
     insertAt = anchorEnd;
   } else if (anchorEnd === current.length) {
-    // Anchor ends at EOF without trailing newline.
     insertAt = anchorEnd;
     needsLeadingNewline = true;
   } else if (current[anchorEnd] === "\n") {
-    // Anchor ends at end-of-line; skip the terminator so the new content
-    // starts on its own line.
     insertAt = anchorEnd + 1;
   } else {
     throw new StructuredError(
@@ -164,8 +151,6 @@ function applyInsertAfter(
   const insert = needsLeadingNewline ? "\n" + body : body;
   return current.slice(0, insertAt) + insert + current.slice(insertAt);
 }
-
-// ---- validation helpers ----
 
 function requireNonEmpty(
   value: string,
@@ -206,16 +191,13 @@ function requireUnique(
   if (count > 1) {
     const code =
       field === "search" ? ErrorCode.SEARCH_AMBIGUOUS : ErrorCode.ANCHOR_AMBIGUOUS;
+    const lines = findOccurrenceLines(haystack, needle);
     throw new StructuredError(
       code,
       `edit[${editIndex}]: '${field}' found ${count} times.`,
       `Extend '${field}' with 2-3 adjacent lines for uniqueness. ` +
-        `Candidate line numbers: ${findOccurrenceLines(haystack, needle).join(", ")}.`,
-      {
-        editIndex,
-        occurrences: count,
-        lines: findOccurrenceLines(haystack, needle),
-      }
+        `Candidate line numbers: ${lines.join(", ")}.`,
+      { editIndex, occurrences: count, lines }
     );
   }
 }
@@ -237,12 +219,6 @@ function preview(s: string, maxLen = 80): string {
   return first.length > maxLen ? first.slice(0, maxLen) + "…" : first;
 }
 
-// ---- unified diff ----
-
-/**
- * Unified diff between two LF-normalized strings, in git format.
- * Returns an empty string if there are no changes.
- */
 export function formatUnifiedDiff(
   oldLf: string,
   newLf: string,

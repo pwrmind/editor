@@ -1,7 +1,7 @@
 {
   "name": "mcp-edit",
-  "version": "0.3.0",
-  "description": "Headless transactional editor for LLMs (MCP). P0+P1+P2: read, search, atomic batch edit.",
+  "version": "0.4.0",
+  "description": "Headless transactional editor for LLMs (MCP). P0+P1+P2+P3: read, search, atomic batch edit, transactions with backups and auto-rollback.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

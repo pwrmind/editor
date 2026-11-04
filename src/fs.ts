@@ -74,10 +74,6 @@ export async function fileExists(p: string): Promise<boolean> {
   }
 }
 
-/**
- * Возвращает real-path внутри workspaceRoot или бросает
- * StructuredError(WORKSPACE_VIOLATION). Защищает от `../` и symlink-escape.
- */
 export async function resolveWorkspacePath(
   input: string,
   workspaceRoot: string

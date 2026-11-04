@@ -12,16 +12,28 @@ async function main(): Promise<void> {
   console.error(`  maxFileSizeBytes = ${config.maxFileSizeBytes}`);
 
   const state = new ServerState(config);
+  await state.init();
+
+  const cleanupTimer = setInterval(() => {
+    state.transactions.cleanupStale().catch((err) => {
+      console.error("[mcp-edit] cleanup error:", err);
+    });
+  }, 30_000);
+  cleanupTimer.unref();
+
   const server = createServer(state);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   console.error(
-    "[mcp-edit] running (stdio). Tools: read_file, search_file, edit_file."
+    "[mcp-edit] running (stdio). Tools: read_file, search_file, edit_file, " +
+      "commit_file, rollback_file, list_transactions."
   );
 
   const shutdown = async () => {
     console.error("[mcp-edit] shutting down…");
+    clearInterval(cleanupTimer);
+    await state.shutdown();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
